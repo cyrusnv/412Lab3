@@ -4,7 +4,7 @@ CC = gcc
 CFLAGS = -Wall -g
 
 # Source files
-SOURCES = realloc.c scanner.c
+SOURCES = scheduler.c scanner.c
 OBJECTS = $(SOURCES:.c=.o)
 
 # Header files
