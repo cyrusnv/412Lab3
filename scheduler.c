@@ -2,57 +2,71 @@
 #include <stdlib.h>
 #include <string.h>
 #include "ir.h"
+
+// Type definitions
+typedef struct Graph Graph; // defines the dependence graph
+typedef struct Node Node; // defines a node in the dg
+
+// Renaming functions
 void rename_registers(struct Instruction *ir);
 int handleThree(struct Instruction *currOp, int VRName, int index);
 int handleStore(struct Instruction *currOp, int VRName, int index);
 int handleLoad(struct Instruction *currOp, int VRName, int index);
 int handleLoadI(struct Instruction *currOp, int VRName);
 
+// Functions for building the dependence graph
+Graph* build_dp(struct Instruction *ir);
+void set_mv(int n);
+int get_mv(int n);
+Graph* createGraph(int ncount);
+Node* createNode(int v);
+
+
 // Debugging functions
 void print_renamed_code_vr(struct Instruction *ir);
 void print_renamed_code_pr(struct Instruction *ir);
-
-// I tried a ton of stuff and none of it worked.
 
 // Global Maps
 int *SRtoVR = NULL;
 int *LU = NULL;
 
 /* Global Variables */
-// Keep track of the # of PRs available and MAXLIVE accounting.
+// These are global variables that survived from Lab 2.
+// Many are probably not useful.
 int maxlive = 0;
 int livecount = 0;
 int prcount;
 int usableprcount;
-//bool reserveregister = false;
-// Keep track of your PR stack for allocation.
-//int *prstack = NULL;
-//int stacktop = 0;
-// Address for where the next value will be spilled to, if necessary.
-//int next_spill_loc = 32768;
 struct Instruction *startir;
 
+/* Global variables that are actually new to Lab 3 */
+static int MAX_VERTICES = 0; // max vertices in dependence graph
+
+// graph functions
+struct Graph* createGraph(int vertices);
+int addEdge(Graph* graph, int src, int dest);
+void getSuccessors(Graph* graph, int vertex);
+void getPredecessors(Graph* graph, int vertex);
+void freeGraph(Graph* graph);
+
+// A node in the adjacency list.
+struct Node {
+    int vertex;
+    struct Node *next;
+};
+
+// This runs the program. Duh.
 int main(int argc, char **argv)
 {
     // Handle -h flag
     if (argc > 1 && strcmp(argv[1], "-h") == 0)
     {
-        printf("Command Syntax:\n");
-        printf("    ./412alloc k filename\n");
-        printf("        k is the number of registers to use (3-64)\n");
-        printf("    ./412alloc -h\n");
-        printf("        Displays this help message\n");
+        printf("YOU SHOULD PROBABLY HANDLE AN H FLAG\n");
         return 0;
     }
     else if (argc > 1 && strcmp(argv[1], "-x") == 0)
     {
-        printf("Code Check 1:\n");
-        // Check arguments
-        if (argc != 3)
-        {
-            fprintf(stderr, "Usage: 412alloc k filename\n");
-            return 1;
-        }
+        printf("You might even have to handle a -x flag.\n");
     } else if (argc > 1) {
 
         // Parse k value
@@ -64,9 +78,8 @@ int main(int argc, char **argv)
             return 1;
         }
     }
-
-    // Build IR using your Lab 1 code
-    // Cyrus you'll need to check to make sure the file is valid here...
+    
+    // TODO: You should probably check to be sure the file is valid.
     struct Instruction *ir = buildIR(argv[2]);
     startir = ir;
     if (ir == NULL)
@@ -77,16 +90,189 @@ int main(int argc, char **argv)
     // Perform register renaming
     rename_registers(ir);
 
-    if (argc > 1 && strcmp(argv[1], "-x") == 0) {
-        // Post-rename print:
-        //printf("POST-RENAME PRINT:\n\n\n");
-        print_renamed_code_vr(ir);
-        //printf("\n\n");
-        return(1);
-    }
+    // We can now set the size of the graph
+    set_mv(opcount + 10);
+    // Take a wild guess what this function does.
+    build_dp(ir);
+
+    printf("MAX_VERTICES: %d\n", MAX_VERTICES);
     
     return 0;
 }
+
+/*
+ * Requires:
+ *      ir -- An instruction struct representing the first instruction
+ *              in the input program IR.
+ *
+ * Effects:
+ *      Builds a dependence graph for the input IR. Returns 0 on success;
+ *      returns a non-zero value on failure.
+ */
+Graph* build_dp(struct Instruction *ir)
+{
+    Graph *dgraph = createGraph(MAX_VERTICES);
+    
+    // Set up DP map
+    int VRtoOpsize = (opcount * 3) + 10;
+    int *VRtoOp = malloc(VRtoOpsize * sizeof(int));
+    for (int i = 0; i < VRtoOpsize; i++) {
+        VRtoOp[i] = -1;
+    }
+
+    // let's pseudocode our way through this, for now.
+    // mr_store = ...
+    // load_list = ...
+    // output_list = ...
+
+    struct Instruction *currOp = ir->next;
+    while (currOp->line != 0) {
+        // Create a node for op
+        int op = currOp->line;
+        //Node *node = createNode(op); // (We'll see if we need this)
+        addNode(dgraph, op);
+
+        // Go over each definition (stores do not have a definition)
+        if (currOp->opcode != STORE) {
+            VRtoOp[currOp->vr3] = op;
+        }
+
+        // Go over each use (LOADI has no uses)
+        if (currOp->opcode != LOADI) {
+            int vr = currOp->vr1;
+            addEdge(dgraph, op, VRtoOp[vr]);
+
+            // Go over the second use (neither LOAD nor LOADI)
+            if (currOp->opcode != LOAD) {
+                int vr2 = currOp->vr2;
+                addEdge(dgraph, op, VRtoOp[vr2]);
+            }
+        }
+
+        // Add serial and conflict edges
+
+
+        currOp = currOp->next;
+    }
+
+    printf("opcount: %d\n", opcount);
+
+    // Imagine we began setting up the graph here, instead.
+
+
+
+    // Begin the algorithm: walk the block, top-to-bottom.
+    
+
+    return (dgraph);
+
+}
+
+/* Graph Management Functions and Definitions */
+
+/* Graph structure, based on an adjacency list. Both forwards and backwards
+ * graphs for predecessors and successors. 
+ */
+struct Graph {
+    int nodeCount;
+
+    Node **forwardgraph;
+    Node **backwardgraph;
+};
+
+/*
+ * Requires:
+ *  - v: an int representing the operation of the node being created.
+ * 
+ * Effects:
+ *  - Returns a node with a vertex of v value with no successor.
+ */
+Node* createNode(int v) {
+    Node* newNode = (Node*)malloc(sizeof(Node));
+    newNode->vertex = v;
+    newNode->next = NULL;
+    return newNode;
+}
+
+/*
+ * Requires:
+ *  - v: an int representing the number of vertices (nodes) in the graph.
+ * 
+ * Effects:
+ *  - Creates a graph of type Graph with the given number of nodes as an adjacency
+ *      list; nodes are initially given value NULL.
+ */
+Graph* createGraph(int ncount) {
+    if (MAX_VERTICES == 0) {
+        printf("createGraph: MAX_VERTICES really should not be 0. It is.\n");
+        return (NULL);
+    } else if (ncount > MAX_VERTICES) {
+        printf("createGraph: ncount > MAX_VERTICES. That's bad.\n");
+        return (NULL);
+    }
+
+    Graph *dgraph = (Graph *)malloc(sizeof(Graph));
+    dgraph->nodeCount = ncount;
+
+    // Allocate arrays
+    dgraph->forwardgraph = (Node**)malloc(ncount * sizeof(Node*));
+    dgraph->backwardgraph = (Node**)malloc(ncount * sizeof(Node*));
+    
+    // Initialize with dummy heads
+    for (int i = 0; i < ncount; i++) {
+        dgraph->forwardgraph[i] = createNode(-1);  // -1 indicates dummy head that is NOT IN GRAPH
+        dgraph->backwardgraph[i] = createNode(-1); // -1 indicates dummy head that is NOT IN GRAPH
+    }
+
+    return (NULL);
+}
+
+/*
+ *  Requires:
+ *      - graph: the Graph to which the node is being added
+ *      - node: an int representing the value of the node being added.
+ * 
+ *  Effects:
+ *      - Updates the dummy head at index node of the forwards and backwards
+ *          graphs to have value -2, which indicates that the node is present
+ *          in the graph.
+ */
+int addNode(Graph *graph, int node) {
+
+    // TODO: add error checking. You should learn to do this in the moment, but...
+
+    graph->forwardgraph[node]->vertex = -2;
+    graph->backwardgraph[node]->vertex = -2;
+
+    return (0);
+}
+
+int addEdge(Graph *graph, int src, int dest) {
+
+    // Ensure that the nodes exists.
+    if (graph->forwardgraph[src]->vertex == -1 || graph->backwardgraph[dest]->vertex == -1) {
+        printf("addEdge: Trying to add an edge that doesn't exist (%d, %d).\n", src, dest);
+        return (1);
+    }
+
+    // Create the new nodes
+    Node *fnode = createNode(src);
+    Node *bnode = createNode(dest);
+
+    // Update the forward graph.
+    fnode->next = graph->forwardgraph[src]->next;
+    graph->forwardgraph[src]->next = fnode;
+
+    // Update the backwards graph.
+    bnode->next = graph->backwardgraph[dest]->next;
+    graph->backwardgraph[dest]->next = bnode;
+
+    return (0);
+}
+
+
+
+/* BELOW: RENAMING CODE THAT I HOPEFULLY DO NOT HAVE TO TOUCH. */
 
 // Function to perform register renaming
 void rename_registers(struct Instruction *ir)

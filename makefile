@@ -1,4 +1,4 @@
-EXECUTABLE = 412alloc
+EXECUTABLE = schedule
 TARNAME = csn2.tar
 CC = gcc
 CFLAGS = -Wall -g
