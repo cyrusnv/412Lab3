@@ -1,0 +1,250 @@
+#!/usr/bin/python3
+
+# COMP 412, Lab 2 test script
+#
+# This script is lab2 specific in that it iterates over a variety 
+# of values of k and uses the lab 2 simulator.
+# 
+# Fall 2020
+#
+# Students: This file is also an example of a python program that 
+# executes directly without a script to invoke it. The first line
+# in the file invokes the interpreter and the main entry parses the
+# (simple) command line arguments.
+
+import os, pwd, time, calendar, sys, datetime
+import operator
+from datetime import datetime, date
+
+## routine to compare two ILOC simulator output files
+def check_output(alloc_output, correct_output):
+    global logfile
+
+    fa = open(alloc_output, 'r')
+    fc = open(correct_output, 'r')
+    line_a = ""
+    line_c = ""
+
+    is_bad = False
+    while True:
+        line_c = fc.readline()
+        while len(line_c) == 1:
+            line_c = fc.readline()
+
+        line_c = line_c.strip("\r ")  # remove random junk & blanks
+
+        line_a = fa.readline()
+        while len(line_a) == 1:
+            line_a = fa.readline()
+
+        line_a = line_a.strip("\r ")  # remove random junk & blanks
+
+        if 'cycle' in line_c:
+            break
+        if line_a == "":
+            is_bad = True
+            break
+
+        if not line_a == line_c:
+            is_bad = True
+            break
+
+    fa.close()
+    fc.close()
+    if is_bad == True:
+        return -1
+
+    if not 'cycle' in line_a:
+        return -1
+
+    temp = line_a.rsplit(' ', 1)[0].rsplit(' ', 1)[1]
+    return int(temp)
+
+# file is the ILOC input file
+# sim is the location of the iloc simulator
+# num_regs is a list of the values for k
+# submission is 
+def lab2_run(execname, filename, dirname, sim, num_regs, tempdir):
+    global logfile
+    global debug
+    global need_newline
+
+    #get input for simulator
+    if debug != 0:
+        print("lab2_run( ",execname,",\n\t",filename,",\n\t",dirname,",\n\t",sim,",\n\t",num_regs,"\n)\n")
+
+    f = open(dirname+'/'+filename, 'r')
+    input = ""
+    output = []
+
+    while True:
+        line = f.readline().strip()
+        if line == "":
+            break
+        if '//SIM INPUT:' in line:
+            input = line.split(':')[1]
+            break
+
+    f.close()
+
+    if debug != 0:
+        print("\tInput is "+input)
+
+    if '/' in filename:
+        result_file = tempdir + '/alloc_' +filename.rsplit('/', 1)[1]
+    else:
+        result_file = tempdir +'/alloc_' + filename
+
+    full_filename = dirname + "/" + filename
+
+    if not '/' in execname:
+        execname = './' + execname
+
+    # get result without allocation
+    correct_output = tempdir+'/correct_output'
+    os.system(sim + ' ' + input + ' < ' + full_filename + ' > ' + correct_output)
+
+    # test the allocator against each value of k in num_regs
+    # 1. run the allocator, saving code in result_file
+    # 2. run the simulator on result file, with appropriate input
+    # 3. call check_output on the two files
+    #
+
+    number_wrong = 0
+
+    alloc_output = tempdir+'/output'
+
+    for r in num_regs:
+        os.system("("+execname + ' ' + str(r) + ' ' + full_filename + ' > ' + result_file+") >&/dev/null")
+        os.system("("+sim+' -r '+str(r)+' '+' '+input+' < '+result_file+' > '+alloc_output+") >&/dev/null")
+        # check the results
+        result = check_output(alloc_output, correct_output)
+        if result < 0:
+            if need_newline == 1:
+                print('')
+                need_newline = 0
+            print('\tFailed at k = ',r)
+            logfile.write("-->\tk = "+str(r)+"\t incorrect results\n")
+            number_wrong = number_wrong + 1
+        else:
+            logfile.write("\tk = "+str(r)+"\t correct in "+str(result)+" cycles\n")
+    
+    return number_wrong
+
+def run_test(executable, filename, dirname):
+
+    sim = '/clear/courses/comp412/students/lab2/sim'
+    num_regs = [5, 7]
+
+    mistakes = lab2_run(executable, filename, dirname, sim, num_regs, tempdir)
+    return mistakes
+ 
+def main():
+    #run in the dir submissions/
+    global tempdir
+    global debug
+    global logfile
+    global need_newline
+
+    debug = 0
+    argc = len(sys.argv)
+
+    if argc != 2:
+        print("Command Line Syntax Error:")
+        print("  Should be '"+sys.argv[0]+" <executable name>'")
+        print("  where <executable name> is the pathname to your executable")
+        exit(0)
+
+    executable = sys.argv[1]
+
+    if (not os.path.exists(executable)):
+        print("\nExecutable '"+executable+"' not found.\nTest halts.\n")
+        exit(-1)
+
+    if (not os.access(executable, os.X_OK)):
+        print("\n'"+executable+"' is not executable.\nTest halts.\n")
+        exit(-1)
+
+    test_files = "/clear/courses/comp412/students/lab2/CodeChecks/inputs/"
+    if (not os.path.exists(test_files)):
+        print("\nDirectory '"+test_files+"' not found.\nTest halts.\n")
+        exit(-1)    
+
+    # Set up the log file
+    root     = os.getcwd()
+    username = pwd.getpwuid( os.getuid())[0]
+    logname  = root +"/" + username + ".log"
+    tempdir  = "/tmp/"+username+"-code-check-2"
+    
+    logfile = open(logname,'w')
+    logfile.write("CodeCheck2 on '"+executable+"' for user "+username+"\n")    
+    
+    if (os.path.exists(tempdir)):
+        print("\nWARNING: Temporary directory "+tempdir+" already exists")
+        print("May indicate that a prior run failed badly\n")
+    else:
+        os.system("mkdir "+tempdir)
+        os.system("chmod 775 "+tempdir)
+        if (not os.access(tempdir, os.R_OK | os.W_OK)):
+            print("Could not create temporary directory\n")
+            exit(-1)
+
+    logfile.write("Using '"+tempdir+"' for temporary storage\n")
+
+    today = date.today()
+    time  = datetime.now()
+    date_string = today.strftime("%m-%d-%y")
+    time_string = time.strftime("%H:%M:%S")
+    host = os.uname()[1]
+    logfile.write('Run on '+date_string+' at '+time_string+' on host '+host)
+
+    print("CodeCheck2 on '"+sys.argv[0]+"' for user "+username)
+    print("COMP 412, Lab 2, Code Check 2\n")
+    print("NetID :"+username+"\t\t"+host)
+    print("Run on "+date_string+" at "+time_string+"\n")
+
+    # Break executable into directory and command name, if necessary
+    #
+    # Because many executables are scripts that reference components
+    # relative to the current directory, we need to move to the
+    # directory that contains the executable.
+
+    execdir = "."
+    if '/' in executable:
+        execdir, execbase = os.path.split(executable)
+        os.chdir(execdir)
+        logfile.write("\nChanging directory to '"+execdir+"'.\n");
+        executable = "./"+execbase
+
+    passed_all = True
+    for filename in sorted(os.listdir(test_files)):
+        splitname = filename.split('.')
+        if (len(splitname) == 2 and splitname[1] == 'i'):
+            need_newline = 1
+            print("File "+filename+": ",end="")
+            logfile.write("\nTesting '"+filename+"'\n")
+            errors = run_test(executable,filename,test_files)
+            if errors == 0:
+                print('all correct')
+            else:
+                passed_all = False
+                print('')
+
+    if passed_all:
+        print("\n"+executable+" passes Code Check 2\n")
+    else:
+        print("\n"+executable+" fails Code Check 2\n")
+        
+
+    # clean up
+    logfile.write("\nRemoving "+tempdir+"\n")
+    os.system("rm -r "+tempdir)
+    if (os.path.exists(tempdir)):
+        logfile.write("--> removal failed\n")
+
+    logfile.write("\nCode Check 2 script exits normally.")
+    exit(0)
+
+
+if __name__ == "__main__":
+    main()

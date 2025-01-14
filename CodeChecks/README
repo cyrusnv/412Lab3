@@ -1,0 +1,52 @@
+COMP 412, Fall 2024
+
+This directory contains the tools to test and pass the two code checks for
+Lab 2. Both code check scripts have simple syntax.
+
+The CodeCheck scripts use the Lab 2 simulator, so you need to run them
+on CLEAR.
+
+TO RUN THE CODE CHECKS:
+
+For code check 1:
+
+    ~comp412/students/lab2/CodeChecks/CodeCheck1  foo
+
+and for code check 2:
+
+    ~comp412/students/lab2/CodeChecks/CodeCheck2  foo
+
+where, in either case, foo is the Linux pathname of your executable.
+
+You should run the code checks from a directory where you have write permission,
+because they leave behind a logfile (named netid.log where netid is the netid
+used to run the script). We recommend you run them from the directory where
+your executable lives, as in
+
+   ~comp412/students/lab2/CodeChecks/CodeCheck1 ./412alloc
+and
+   ~comp412/students/lab2/CodeChecks/CodeCheck2 ./412alloc
+
+Of course, you can copy the script into that directory, which would allow you
+to run the code checks as
+
+   ./CodeCheck1  ./412alloc
+and
+    ./CodeCheck2 ./412alloc
+
+RESULTS OF THE CODE CHECKS:
+
+The Code Check will print out summary results to the standard output file.
+The last line will state whether the tested executable passed or failed
+
+If the executable failed the test, the logfile may contain more information
+that helps you understand what happened.
+
+SUBMITTING THE RESULTS OF YOUR CODE CHECK:
+
+To submit your results, take a screen shot of the results and upload it to
+the appropriate assignment on Canvas. These screenshots are manually graded,
+so it may take several days before credit appears in the Canvas Gradebook.
+
+
+
