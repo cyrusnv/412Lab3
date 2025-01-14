@@ -20,6 +20,7 @@ void set_mv(int n);
 int get_mv(int n);
 Graph* createGraph(int ncount);
 Node* createNode(int v);
+int addNode(Graph *graph, int node);
 
 
 // Debugging functions
@@ -93,7 +94,7 @@ int main(int argc, char **argv)
     // We can now set the size of the graph
     set_mv(opcount + 10);
     // Take a wild guess what this function does.
-    build_dp(ir);
+    Graph *dp = build_dp(ir);
 
     printf("MAX_VERTICES: %d\n", MAX_VERTICES);
     
@@ -149,9 +150,44 @@ Graph* build_dp(struct Instruction *ir)
             }
         }
 
-        // Add serial and conflict edges
+        /* Add serial and conflict edges */
+        int mr_store = -1; // Store the line of the most recent ILOC STORE
+        // Repurpose the Node structure to keep track of recent LOADs and OUTPUTs
+        Node *load_list_head = createNode(-7);
+        Node *output_list_head = createNode(-8);
+        switch(currOp->opcode) {
+            case LOAD:
+                if (mr_store != -1) {
+                    addEdge(dgraph, op, mr_store);
+                }
+                break;
+            case OUTPUT:
+                if (mr_store != -1) {
+                    addEdge(dgraph, op, mr_store);
+                }
+                if (output_list_head->next != NULL) {
+                    addEdge(dgraph, op, output_list_head->next->vertex);
+                }
+                break;
+            case STORE:
+                if (mr_store != -1) {
+                    addEdge(dgraph, op, mr_store);
+                }
+                // add serialization edges based on previous stores and outputs.
+                Node *edgeNode = load_list_head->next;
+                while (edgeNode != NULL) {
+                    addEdge(dgraph, op, edgeNode->vertex);
+                    edgeNode = edgeNode->next;
+                }
+                edgeNode = output_list_head;
+                while (edgeNode != NULL) {
+                    addEdge(dgraph, op, edgeNode->vertex);
+                    edgeNode = edgeNode->next;
+                }
+        }
 
-
+        if (currOp->opcode == STORE) mr_store = op;
+        
         currOp = currOp->next;
     }
 
