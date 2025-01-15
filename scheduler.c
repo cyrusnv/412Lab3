@@ -19,11 +19,14 @@ Graph *build_dp(struct Instruction *ir);
 void set_mv(int n);
 int get_mv(int n);
 Graph *createGraph(int ncount);
-Node *createNode(int v);
+Node *createNode(int v, int etype, int ocode);
 int addNode(Graph *graph, int node, int opcode);
 void writeToDotFile(Graph *g, struct Instruction *ir);
 void printNodes(Graph *g);
 void printEdges(Graph *g);
+void setnodeOC(Node *n, int ocode);
+int getLatency(int ocode);
+
 
 // Debugging functions
 void print_renamed_code_vr(struct Instruction *ir);
@@ -47,7 +50,7 @@ static int MAX_VERTICES = 0; // max vertices in dependence graph
 
 // graph functions
 struct Graph *createGraph(int vertices);
-int addEdge(Graph *graph, int src, int dest);
+int addEdge(Graph *graph, int src, int dest, int etype, int ocode);
 void getSuccessors(Graph *graph, int vertex);
 void getPredecessors(Graph *graph, int vertex);
 void freeGraph(Graph *graph);
@@ -57,6 +60,8 @@ struct Node
 {
     int vertex;
     int opcode;
+    int edgetype; // 0 (Data), 1 (Serialization), 2 (Conflict), -1 (unassigned)
+    int latency;
     struct Node *next;
 };
 
@@ -134,8 +139,8 @@ Graph *build_dp(struct Instruction *ir)
 
     int mr_store = -1; // Store the line of the most recent ILOC STORE
     // Repurpose the Node structure to keep track of recent LOADs and OUTPUTs
-    Node *load_list_head = createNode(-7);
-    Node *output_list_head = createNode(-8);
+    Node *load_list_head = createNode(-7, -1, LOAD);
+    Node *output_list_head = createNode(-8, -1, OUTPUTL);
     struct Instruction *currOp = ir->next;
     while (currOp->line != -1)
     {
@@ -146,81 +151,102 @@ Graph *build_dp(struct Instruction *ir)
         printEdges(dgraph);
         // Print the map
         printf("MAP PRINT\n");
-        for (int i = 0; i < VRtoOpsize; i++) {
-            if (VRtoOp[i] != -1) {
+        for (int i = 0; i < VRtoOpsize; i++)
+        {
+            if (VRtoOp[i] != -1)
+            {
                 printf("    %d: %d\n", i, VRtoOp[i]);
             }
         }
         printf("\n");
 
-        // Node *node = createNode(op); // (We'll see if we need this)
+        // Add the node to the graph
         addNode(dgraph, op, currOp->opcode);
 
         // Go over each definition (stores do not have a definition)
-        if (currOp->opcode != STORE)
+        if (currOp->opcode != STORE && currOp->opcode != OUTPUTL)
         {
             VRtoOp[currOp->vr3] = op;
         }
 
         // Go over each use (LOADI has no uses)
-        if (currOp->opcode != LOADIL)
+        if (currOp->opcode != LOADIL && currOp->opcode != OUTPUTL)
         {
             int vr = currOp->vr1;
             printf("adding edge for use 1: %d to %d\n", op, VRtoOp[vr]);
-            addEdge(dgraph, op, VRtoOp[vr]);
+            addEdge(dgraph, op, VRtoOp[vr], 0, currOp->opcode);
 
             // Go over the second use (neither LOAD nor LOADI)
             if (currOp->opcode != LOAD)
             {
-                int vr2 = currOp->vr2;
-                printf("adding edge for use 2: %d to %d\n", op, VRtoOp[vr2]);
-                addEdge(dgraph, op, VRtoOp[vr2]);
+                // I stored the second use of STORE in vr3, which leads to this stupid code...
+                if (currOp->opcode == STORE)
+                {
+                    int vr3 = currOp->vr3;
+                    printf("adding edge for use 2: %d to %d\n", op, VRtoOp[vr3]);
+                    addEdge(dgraph, op, VRtoOp[vr3], 0, currOp->opcode);
+                }
+                else
+                {
+                    int vr2 = currOp->vr2;
+                    printf("adding edge for use 2: %d to %d\n", op, VRtoOp[vr2]);
+                    addEdge(dgraph, op, VRtoOp[vr2], 0, currOp->opcode);
+                }
             }
         }
 
+        // Add serialization and conflict edges
         switch (currOp->opcode)
         {
         case LOAD:
             if (mr_store != -1)
             {
-                addEdge(dgraph, op, mr_store);
+                addEdge(dgraph, op, mr_store, 2, LOAD); // add conflict edge
             }
+            Node *loadNode = createNode(op, -1, LOAD);
+            loadNode->next = load_list_head->next;
+            load_list_head->next = loadNode;
             break;
-        case OUTPUT:
-            if (mr_store != -1)
+        case OUTPUTL:
+            if (mr_store != -1) // add conflict edge
             {
-                addEdge(dgraph, op, mr_store);
+                addEdge(dgraph, op, mr_store, 2, OUTPUTL);
             }
-            if (output_list_head->next != NULL)
+            if (output_list_head->next != NULL) // add serialization edge
             {
-                addEdge(dgraph, op, output_list_head->next->vertex);
+                addEdge(dgraph, op, output_list_head->next->vertex, 1, OUTPUTL);
             }
+            Node *outNode = createNode(op, -1, OUTPUTL);
+            outNode->next = output_list_head->next;
+            output_list_head->next = outNode;
             break;
         case STORE:
-            if (mr_store != -1)
+            if (mr_store != -1) // add serialization edge
             {
-                addEdge(dgraph, op, mr_store);
+                addEdge(dgraph, op, mr_store, 1, STORE);
             }
             // add serialization edges based on previous stores and outputs.
             Node *edgeNode = load_list_head->next;
             while (edgeNode != NULL)
             {
-                addEdge(dgraph, op, edgeNode->vertex);
+                addEdge(dgraph, op, edgeNode->vertex, 1, STORE);
                 edgeNode = edgeNode->next;
             }
-            edgeNode = output_list_head;
+            edgeNode = output_list_head->next;
             while (edgeNode != NULL)
             {
-                addEdge(dgraph, op, edgeNode->vertex);
+                addEdge(dgraph, op, edgeNode->vertex, 1, STORE);
                 edgeNode = edgeNode->next;
             }
         }
 
         if (currOp->opcode == STORE)
+        {
+            printf("mr_store updated to: %d\n", op);
             mr_store = op;
+        }
 
         currOp = currOp->next;
-
     }
 
     // printf("opcount: %d\n", opcount);
@@ -244,17 +270,81 @@ struct Graph
 /*
  * Requires:
  *  - v: an int representing the operation of the node being created.
+ *  - etype: an int representing the type of edge the node represents.
+ *      Should be either 0 (Data), 1 (Serialization), 2 (Conflict), -1 (unassigned).
+ *  - ocode: an int representing the opcode of the node. Pass -1 if unassigned.
  *
  * Effects:
- *  - Returns a node with a vertex of v value with no successor. Opcode is NULL.
+ *  - Returns a node with a vertex of v value with no successor.
  */
-Node *createNode(int v)
+Node *createNode(int v, int etype, int ocode)
 {
     Node *newNode = (Node *)malloc(sizeof(Node));
     newNode->vertex = v;
     newNode->next = NULL;
-    newNode->opcode = -28;
+    if (etype == 0)
+    {
+        setnodeOC(newNode, ocode);
+    }
+    else if (etype == 1)
+    {
+        newNode->opcode = ocode;
+        newNode->latency = 1;
+    }
+    else if (etype == 2)
+    {
+        newNode->opcode = ocode;
+        newNode->latency = 3;
+    }
+    newNode->edgetype = etype;
     return newNode;
+}
+
+/*
+ *  Requires:
+ *      - n: a node whose opcode and latency will be updated.
+ *      - ocode: the opcode to be given to the node
+ *
+ *  Effects:
+ *      - Updates opcode and latency. This function exists so I never forget to do both. *
+ */
+void setnodeOC(Node *n, int ocode)
+{
+    n->opcode = ocode;
+
+    switch (ocode)
+    {
+    case LOAD:
+        n->latency = 6;
+        break;
+    case STORE:
+        n->latency = 6;
+        break;
+    case MULT:
+        n->latency = 3;
+        break;
+    default:
+        n->latency = 1;
+        break;
+    }
+}
+
+int getLatency(int ocode)
+{
+    switch (ocode)
+    {
+    case LOAD:
+        return (6);
+        break;
+    case STORE:
+        return (6);
+        break;
+    case MULT:
+        return (3);
+    default:
+        return (1);
+        break;
+    }
 }
 
 /*
@@ -289,8 +379,8 @@ Graph *createGraph(int ncount)
     // Initialize with dummy heads
     for (int i = 0; i < ncount; i++)
     {
-        dgraph->forwardgraph[i] = createNode(-1);  // -1 indicates dummy head that is NOT IN GRAPH
-        dgraph->backwardgraph[i] = createNode(-1); // -1 indicates dummy head that is NOT IN GRAPH
+        dgraph->forwardgraph[i] = createNode(-1, -1, -1);  // -1 indicates dummy head that is NOT IN GRAPH
+        dgraph->backwardgraph[i] = createNode(-1, -1, -1); // -1 indicates dummy head that is NOT IN GRAPH
     }
 
     return (dgraph);
@@ -310,29 +400,36 @@ int addNode(Graph *graph, int node, int opcode)
 {
 
     // TODO: add error checking. You should learn to do this in the moment, but...
-    if (node < 0 || node >= graph->nodeCount) {
+    if (node < 0 || node >= graph->nodeCount)
+    {
         fprintf(stderr, "Error: vertex index out of bounds. Vertex: %d, Opcode: %d\n", node, opcode);
         return (1);
     }
 
     graph->forwardgraph[node]->vertex = -2;
-    graph->forwardgraph[node]->opcode = opcode;
+    // graph->forwardgraph[node]->opcode = opcode;
+    setnodeOC(graph->forwardgraph[node], opcode);
+
     graph->backwardgraph[node]->vertex = -2;
-    graph->backwardgraph[node]->opcode = opcode;
+    // graph->backwardgraph[node]->opcode = opcode;
+    setnodeOC(graph->backwardgraph[node], opcode);
 
     return (0);
 }
 
-void printNodes(Graph *g) {
+void printNodes(Graph *g)
+{
     printf("PRINTNODES CHECK:\n");
-    for (int i = 0; i < g->nodeCount; i++) {
-        if (g->forwardgraph[i]->vertex == -2) {
+    for (int i = 0; i < g->nodeCount; i++)
+    {
+        if (g->forwardgraph[i]->vertex == -2)
+        {
             printf("    Node present: %d\n", i);
         }
     }
 }
 
-int addEdge(Graph *graph, int src, int dest)
+int addEdge(Graph *graph, int src, int dest, int etype, int ocode)
 {
 
     // Ensure that the nodes exists.
@@ -342,13 +439,33 @@ int addEdge(Graph *graph, int src, int dest)
         return (1);
     }
 
-    if (src == dest) {
+    if (src == dest)
+    {
         printf("addEdge warning: src = dest. Are you sure about that?\n");
     }
 
+    // Check if the edge already exists, probably.
+    Node *predEdge = graph->forwardgraph[src];
+    Node *oldEdge = graph->forwardgraph[src]->next;
+    while (oldEdge != NULL)
+    {
+        if (oldEdge->vertex == dest)
+        {
+            if (oldEdge->latency < getLatency(ocode)) {
+                predEdge->next = oldEdge->next;
+                free(oldEdge);
+            } else {
+                return (0);
+            }
+        }
+
+        oldEdge = oldEdge->next;
+        predEdge = predEdge->next;
+    }
+
     // Create the new nodes
-    Node *fnode = createNode(dest);
-    Node *bnode = createNode(src);
+    Node *fnode = createNode(dest, etype, ocode);
+    Node *bnode = createNode(src, etype, ocode);
 
     // Update the forward graph.
     fnode->next = graph->forwardgraph[src]->next;
@@ -361,12 +478,16 @@ int addEdge(Graph *graph, int src, int dest)
     return (0);
 }
 
-void printEdges(Graph *g) {
+void printEdges(Graph *g)
+{
     printf("EDGE CHECK (src, dest)\n");
-    for (int i = 0; i < g->nodeCount; i++) {
-        if (g->forwardgraph[i]->vertex == -2) {
+    for (int i = 0; i < g->nodeCount; i++)
+    {
+        if (g->forwardgraph[i]->vertex == -2)
+        {
             Node *edge = g->forwardgraph[i]->next;
-            while (edge != NULL) {
+            while (edge != NULL)
+            {
                 printf("    (%d, %d)\n", i, edge->vertex);
                 edge = edge->next;
             }
@@ -374,7 +495,8 @@ void printEdges(Graph *g) {
     }
 }
 
-void set_mv(int n) {
+void set_mv(int n)
+{
     MAX_VERTICES = n;
 }
 
@@ -407,8 +529,10 @@ void printGraph(Graph *g)
 }
 */
 
-void printGraph(Graph *g, struct Instruction *ir, FILE *dotfile) {
-    if (dotfile == NULL) {
+void printGraph(Graph *g, struct Instruction *ir, FILE *dotfile)
+{
+    if (dotfile == NULL)
+    {
         printf("Error: No file provided for graph output\n");
         return;
     }
@@ -418,42 +542,45 @@ void printGraph(Graph *g, struct Instruction *ir, FILE *dotfile) {
 
     // First pass: Print all nodes with their ILOC instructions
     struct Instruction *curr = ir->next;
-    while (curr->line != -1) {
-        if (g->forwardgraph[curr->line]->vertex == -2) { // Node exists in graph
+    while (curr->line != -1)
+    {
+        if (g->forwardgraph[curr->line]->vertex == -2)
+        { // Node exists in graph
             fprintf(dotfile, "    %d [label=\"%d: ", curr->line, curr->line);
-            
+
             // Format the ILOC instruction based on opcode
-            switch(curr->opcode) {
-                case LOADIL:
-                    fprintf(dotfile, "loadI %d => r%d", curr->sr1, curr->sr3);
-                    break;
-                case LOAD:
-                    fprintf(dotfile, "load r%d => r%d", curr->sr1, curr->sr3);
-                    break;
-                case STORE:
-                    fprintf(dotfile, "store r%d => r%d", curr->sr1, curr->sr3);
-                    break;
-                case ADD:
-                    fprintf(dotfile, "add r%d, r%d => r%d", curr->sr1, curr->sr2, curr->sr3);
-                    break;
-                case SUB:
-                    fprintf(dotfile, "sub r%d, r%d => r%d", curr->sr1, curr->sr2, curr->sr3);
-                    break;
-                case MULT:
-                    fprintf(dotfile, "mult r%d, r%d => r%d", curr->sr1, curr->sr2, curr->sr3);
-                    break;
-                case LSHIFT:
-                    fprintf(dotfile, "lshift r%d, r%d => r%d", curr->sr1, curr->sr2, curr->sr3);
-                    break;
-                case RSHIFT:
-                    fprintf(dotfile, "rshift r%d, r%d => r%d", curr->sr1, curr->sr2, curr->sr3);
-                    break;
-                case OUTPUTL:
-                    fprintf(dotfile, "output %d", curr->sr1);
-                    break;
-                case NOPL:
-                    fprintf(dotfile, "nop");
-                    break;
+            switch (curr->opcode)
+            {
+            case LOADIL:
+                fprintf(dotfile, "loadI %d => r%d", curr->sr1, curr->sr3);
+                break;
+            case LOAD:
+                fprintf(dotfile, "load r%d => r%d", curr->sr1, curr->sr3);
+                break;
+            case STORE:
+                fprintf(dotfile, "store r%d => r%d", curr->sr1, curr->sr3);
+                break;
+            case ADD:
+                fprintf(dotfile, "add r%d, r%d => r%d", curr->sr1, curr->sr2, curr->sr3);
+                break;
+            case SUB:
+                fprintf(dotfile, "sub r%d, r%d => r%d", curr->sr1, curr->sr2, curr->sr3);
+                break;
+            case MULT:
+                fprintf(dotfile, "mult r%d, r%d => r%d", curr->sr1, curr->sr2, curr->sr3);
+                break;
+            case LSHIFT:
+                fprintf(dotfile, "lshift r%d, r%d => r%d", curr->sr1, curr->sr2, curr->sr3);
+                break;
+            case RSHIFT:
+                fprintf(dotfile, "rshift r%d, r%d => r%d", curr->sr1, curr->sr2, curr->sr3);
+                break;
+            case OUTPUTL:
+                fprintf(dotfile, "output %d", curr->sr1);
+                break;
+            case NOPL:
+                fprintf(dotfile, "nop");
+                break;
             }
             fprintf(dotfile, "\"];\n");
         }
@@ -462,25 +589,38 @@ void printGraph(Graph *g, struct Instruction *ir, FILE *dotfile) {
 
     // Second pass: Print all edges with dependency information
     // Data dependencies are typically from use to definition
-    for (int i = 1; i < g->nodeCount; i++) {
-        if (g->forwardgraph[i]->vertex == -2) {
+    for (int i = 1; i < g->nodeCount; i++)
+    {
+        if (g->forwardgraph[i]->vertex == -2)
+        {
             Node *edge = g->forwardgraph[i]->next;
-            while (edge != NULL) {
+            while (edge != NULL)
+            {
                 int src = i;
                 int dest = edge->vertex;
-                
+
                 // Determine edge type
-                if (edge->opcode == -1) { // Serialization edge
-                    fprintf(dotfile, "    %d -> %d [label=\" Serial\"];\n", src, dest);
-                } else {
+                if (edge->edgetype == 1)
+                { // Serialization edge
+                    fprintf(dotfile, "    %d -> %d [label=\" Serial l=%d\"];\n", src, dest, edge->latency);
+                }
+                else if (edge->edgetype == 2)
+                { // Conflict edge
+                    fprintf(dotfile, "    %d -> %d [label=\" Conflict l=%d\"];\n",
+                            src, dest, edge->latency);
+                }
+                else
+                {
                     // For data dependencies, show the register that creates the dependency
                     struct Instruction *srcInst = ir;
-                    while (srcInst != NULL && srcInst->line != src) {
+                    while (srcInst != NULL && srcInst->line != src)
+                    {
                         srcInst = srcInst->next;
                     }
-                    if (srcInst != NULL) {
-                        fprintf(dotfile, "    %d -> %d [label=\" Data, vr%d\"];\n", 
-                                src, dest, srcInst->vr3);
+                    if (srcInst != NULL)
+                    {
+                        fprintf(dotfile, "    %d -> %d [label=\" Data, vr%d, l=%d\"];\n",
+                                src, dest, srcInst->vr3, edge->latency);
                     }
                 }
                 edge = edge->next;
@@ -489,14 +629,19 @@ void printGraph(Graph *g, struct Instruction *ir, FILE *dotfile) {
     }
 
     // Third pass: Add any special edges (like Conflict edges for memory operations)
+    /*
     curr = ir->next;
-    while (curr->line != 0) {
-        if (curr->opcode == OUTPUT) {
+    while (curr->line != 0)
+    {
+        if (curr->opcode == OUTPUT)
+        {
             // Add conflict edges from output to any previous stores
             struct Instruction *prev = ir->next;
-            while (prev->line != curr->line) {
-                if (prev->opcode == STORE) {
-                    fprintf(dotfile, "    %d -> %d [label=\" Conflict\"];\n", 
+            while (prev->line != curr->line)
+            {
+                if (prev->opcode == STORE)
+                {
+                    fprintf(dotfile, "    %d -> %d [label=\" Conflict\"];\n",
                             curr->line, prev->line);
                 }
                 prev = prev->next;
@@ -504,22 +649,25 @@ void printGraph(Graph *g, struct Instruction *ir, FILE *dotfile) {
         }
         curr = curr->next;
     }
+    */
 
     fprintf(dotfile, "}\n");
     fflush(dotfile);
 }
 
 // Helper function to write graph to a DOT file
-void writeToDotFile(Graph *g, struct Instruction *ir) {
+void writeToDotFile(Graph *g, struct Instruction *ir)
+{
     FILE *dotfile = fopen("dgraph.dot", "w");
-    if (dotfile == NULL) {
+    if (dotfile == NULL)
+    {
         printf("Error opening file %s for writing\n", "dgraph.dot");
         return;
     }
-    
+
     printGraph(g, ir, dotfile);
     fclose(dotfile);
-    
+
     printf("Graph written to %s\n", "dgraph.dot");
     printf("To visualize, use command: dot -Tpdf %s -o graph.pdf\n", "dgraph.dot");
 }
