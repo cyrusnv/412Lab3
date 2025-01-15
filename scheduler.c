@@ -26,13 +26,18 @@ void printNodes(Graph *g);
 void printEdges(Graph *g);
 void setnodeOC(Node *n, int ocode);
 int getLatency(int ocode);
+int checkGraphConsistency(Graph *graph);
+struct Graph *createGraph(int vertices);
+int addEdge(Graph *graph, int src, int dest, int etype, int ocode);
+void getSuccessors(Graph *graph, int vertex);
+void getPredecessors(Graph *graph, int vertex);
+void freeGraph(Graph *graph);
 
-
-// Debugging functions
+// Debugging functions (Lab 2)
 void print_renamed_code_vr(struct Instruction *ir);
 void print_renamed_code_pr(struct Instruction *ir);
 
-// Global Maps
+// Global Maps (Lab 2)
 int *SRtoVR = NULL;
 int *LU = NULL;
 
@@ -48,13 +53,6 @@ struct Instruction *startir;
 /* Global variables that are actually new to Lab 3 */
 static int MAX_VERTICES = 0; // max vertices in dependence graph
 
-// graph functions
-struct Graph *createGraph(int vertices);
-int addEdge(Graph *graph, int src, int dest, int etype, int ocode);
-void getSuccessors(Graph *graph, int vertex);
-void getPredecessors(Graph *graph, int vertex);
-void freeGraph(Graph *graph);
-
 // A node in the adjacency list.
 struct Node
 {
@@ -66,8 +64,11 @@ struct Node
 };
 
 // This runs the program. Duh.
+// Effects: runs the program. Duh.
 int main(int argc, char **argv)
 {
+
+    // TODO: Much of the guts of this is still from Lab 2. This should be changed.
     // Handle -h flag
     if (argc > 1 && strcmp(argv[1], "-h") == 0)
     {
@@ -80,7 +81,7 @@ int main(int argc, char **argv)
     }
     else if (argc > 1)
     {
-
+        // Yeah you definitely don't need stuff like this anymore.
         // Parse k value
         // printf("Code Check 2:\n");
         prcount = atoi(argv[1]);
@@ -111,7 +112,9 @@ int main(int argc, char **argv)
     printf("MAX_VERTICES: %d\n", MAX_VERTICES);
     // Take a wild guess what this function does.
     Graph *dp = build_dp(ir);
-
+    // Make sure that the graph you built is decent.
+    checkGraphConsistency(dp);
+    // Use graphviz, for the sake of my sanity.
     writeToDotFile(dp, ir);
     return 0;
 }
@@ -138,13 +141,13 @@ Graph *build_dp(struct Instruction *ir)
     }
 
     int mr_store = -1; // Store the line of the most recent ILOC STORE
-    // Repurpose the Node structure to keep track of recent LOADs and OUTPUTs
+    /* Repurpose the Node structure to keep track of recent LOADs and OUTPUTs
+        (for conflict and serialization edges) */
     Node *load_list_head = createNode(-7, -1, LOAD);
     Node *output_list_head = createNode(-8, -1, OUTPUTL);
     struct Instruction *currOp = ir->next;
     while (currOp->line != -1)
     {
-        // Create a node for op
         int op = currOp->line;
         printf("op: %d, opcode: %d\n", op, currOp->opcode);
         printNodes(dgraph);
@@ -160,7 +163,7 @@ Graph *build_dp(struct Instruction *ir)
         }
         printf("\n");
 
-        // Add the node to the graph
+        // Add a node for op to the graph
         addNode(dgraph, op, currOp->opcode);
 
         // Go over each definition (stores do not have a definition)
@@ -179,14 +182,14 @@ Graph *build_dp(struct Instruction *ir)
             // Go over the second use (neither LOAD nor LOADI)
             if (currOp->opcode != LOAD)
             {
-                // I stored the second use of STORE in vr3, which leads to this stupid code...
+                // I stored the second use of STORE in vr3, instead of vr2, which leads to this stupid code...
                 if (currOp->opcode == STORE)
                 {
                     int vr3 = currOp->vr3;
                     printf("adding edge for use 2: %d to %d\n", op, VRtoOp[vr3]);
                     addEdge(dgraph, op, VRtoOp[vr3], 0, currOp->opcode);
                 }
-                else
+                else // this is the "normal" case I wish I had considered in Lab 1.
                 {
                     int vr2 = currOp->vr2;
                     printf("adding edge for use 2: %d to %d\n", op, VRtoOp[vr2]);
@@ -201,9 +204,9 @@ Graph *build_dp(struct Instruction *ir)
         case LOAD:
             if (mr_store != -1)
             {
-                addEdge(dgraph, op, mr_store, 2, LOAD); // add conflict edge
+                addEdge(dgraph, op, mr_store, 2, LOAD); // add conflict edge from recent store
             }
-            Node *loadNode = createNode(op, -1, LOAD);
+            Node *loadNode = createNode(op, -1, LOAD); // update list of previous loads
             loadNode->next = load_list_head->next;
             load_list_head->next = loadNode;
             break;
@@ -216,7 +219,7 @@ Graph *build_dp(struct Instruction *ir)
             {
                 addEdge(dgraph, op, output_list_head->next->vertex, 1, OUTPUTL);
             }
-            Node *outNode = createNode(op, -1, OUTPUTL);
+            Node *outNode = createNode(op, -1, OUTPUTL); // update list of previous outputs
             outNode->next = output_list_head->next;
             output_list_head->next = outNode;
             break;
@@ -241,7 +244,7 @@ Graph *build_dp(struct Instruction *ir)
         }
 
         if (currOp->opcode == STORE)
-        {
+        { // update the most recent STORE if applicable!
             printf("mr_store updated to: %d\n", op);
             mr_store = op;
         }
@@ -256,7 +259,8 @@ Graph *build_dp(struct Instruction *ir)
 
 /* Graph Management Functions and Definitions */
 
-/* Graph structure, based on an adjacency list. Both forwards and backwards
+/*
+ * Graph structure, based on an adjacency list. Both forwards and backwards
  * graphs for predecessors and successors.
  */
 struct Graph
@@ -282,6 +286,8 @@ Node *createNode(int v, int etype, int ocode)
     Node *newNode = (Node *)malloc(sizeof(Node));
     newNode->vertex = v;
     newNode->next = NULL;
+    /* We only want to use setnodeOC on data edges.
+        (Not serialization or conflict, or we'll get the wrong latencies.) */
     if (etype == 0)
     {
         setnodeOC(newNode, ocode);
@@ -329,6 +335,13 @@ void setnodeOC(Node *n, int ocode)
     }
 }
 
+/*
+ * Requires:
+ *  - ocode: an int representing an opcode.
+ *
+ * Effects:
+ *  - Returns the latency that corresponds with an opcode.
+ */
 int getLatency(int ocode)
 {
     switch (ocode)
@@ -359,12 +372,12 @@ Graph *createGraph(int ncount)
 {
     if (MAX_VERTICES == 0)
     {
-        printf("createGraph: MAX_VERTICES really should not be 0. It is.\n");
+        fprintf(stderr, "createGraph: MAX_VERTICES really should not be 0. It is.\n");
         return (NULL);
     }
     else if (ncount > MAX_VERTICES)
     {
-        printf("createGraph: ncount > MAX_VERTICES. That's bad.\n");
+        fprintf(stderr, "createGraph: ncount > MAX_VERTICES. That's bad.\n");
         return (NULL);
     }
 
@@ -417,6 +430,9 @@ int addNode(Graph *graph, int node, int opcode)
     return (0);
 }
 
+/*
+ * Function that prints the nodes in a graph g, based on its forwardgraph.
+ */
 void printNodes(Graph *g)
 {
     printf("PRINTNODES CHECK:\n");
@@ -429,6 +445,17 @@ void printNodes(Graph *g)
     }
 }
 
+/*
+ * Requires:
+ *  - Graph *graph: the Graph pointer to which the edge will be added.
+ *  - int src: the vertex of the node that is the source of the edge.
+ *  - int dest: the vertex of the node that is the destination of the edge.
+ *  - int etype: represents what the kind of edge is (0: Data, 1: Serialization, 2: Conflict)
+ *  - int ocode: represents the opcode of the edge (source)
+ *
+ * Effects:
+ *  - Adds an edge in both the forwards and backwards graphs of graph from dest to src.
+ */
 int addEdge(Graph *graph, int src, int dest, int etype, int ocode)
 {
 
@@ -439,22 +466,26 @@ int addEdge(Graph *graph, int src, int dest, int etype, int ocode)
         return (1);
     }
 
+    // There's no need to add edges to self. If it ever happens, I've messed up.
     if (src == dest)
     {
-        printf("addEdge warning: src = dest. Are you sure about that?\n");
+        fprintf(stderr, "addEdge warning: src = dest. Are you sure about that?\n");
     }
 
-    // Check if the edge already exists, probably.
+    // Check if the edge already exists
     Node *predEdge = graph->forwardgraph[src];
     Node *oldEdge = graph->forwardgraph[src]->next;
     while (oldEdge != NULL)
     {
         if (oldEdge->vertex == dest)
         {
-            if (oldEdge->latency < getLatency(ocode)) {
+            if (oldEdge->latency < getLatency(ocode))
+            { // if it does and is smaller, delete the old edge and continue
                 predEdge->next = oldEdge->next;
                 free(oldEdge);
-            } else {
+            }
+            else
+            { // If it's bigger, we don't need to add this current edge.
                 return (0);
             }
         }
@@ -478,6 +509,9 @@ int addEdge(Graph *graph, int src, int dest, int etype, int ocode)
     return (0);
 }
 
+/*
+ * Effects: prints the edges in Graph *g. For testing.
+ */
 void printEdges(Graph *g)
 {
     printf("EDGE CHECK (src, dest)\n");
@@ -495,40 +529,135 @@ void printEdges(Graph *g)
     }
 }
 
+/*
+ * Requires:
+ *  - graph: the Graph object to check the consistency of.
+ *
+ * Effects:
+ * Validates that the forward and backward graphs are consistent with each other.
+ * Returns 1 if the graphs are consistent, 0 otherwise.
+ *
+ * For each edge (a,b) in the forward graph, there should be a corresponding
+ * edge (b,a) in the backward graph with the same properties (edge type, opcode, latency).
+ * If there isn't then I'm really screwed.
+ */
+int checkGraphConsistency(Graph *graph)
+{
+    // Count total edges in forward and backward graphs
+    int forwardEdgeCount = 0;
+    int backwardEdgeCount = 0;
+
+    // Get raw edge count in both graphs
+    for (int i = 0; i < graph->nodeCount; i++)
+    {
+        Node *fwdNode = graph->forwardgraph[i];
+        Node *bwdNode = graph->backwardgraph[i];
+
+        // Skip if node doesn't exist in graph (vertex == -1)
+        if (fwdNode->vertex == -1 || bwdNode->vertex == -1)
+        {
+            continue;
+        }
+
+        // Count forward edges
+        Node *curr = fwdNode->next;
+        while (curr != NULL)
+        {
+            forwardEdgeCount++;
+            curr = curr->next;
+        }
+
+        // backward edges
+        curr = bwdNode->next;
+        while (curr != NULL)
+        {
+            backwardEdgeCount++;
+            curr = curr->next;
+        }
+    }
+
+    // Check if edge counts match
+    if (forwardEdgeCount != backwardEdgeCount)
+    {
+        fprintf(stderr, "GRAPH ERROR: Edge count mismatch - Forward: %d, Backward: %d\n",
+                forwardEdgeCount, backwardEdgeCount);
+        return 0;
+    }
+
+    // Second pass: verify edge correspondence
+    for (int i = 0; i < graph->nodeCount; i++)
+    {
+        Node *fwdNode = graph->forwardgraph[i];
+
+        // Skip if node doesn't exist
+        if (fwdNode->vertex == -1)
+        {
+            continue;
+        }
+
+        // Check each forward edge
+        Node *fwdEdge = fwdNode->next;
+        while (fwdEdge != NULL)
+        {
+            int found = 0;
+            int dest = fwdEdge->vertex;
+
+            // Look for corresponding backward edge
+            Node *bwdEdge = graph->backwardgraph[dest]->next;
+            while (bwdEdge != NULL)
+            {
+                if (bwdEdge->vertex == i)
+                {
+                    // Found corresponding edge, verify that the properties match, too
+                    if (bwdEdge->edgetype != fwdEdge->edgetype ||
+                        bwdEdge->opcode != fwdEdge->opcode ||
+                        bwdEdge->latency != fwdEdge->latency)
+                    {
+                        fprintf(stderr, "Error: Edge property mismatch for edge (%d,%d)\n",
+                                i, dest);
+                        fprintf(stderr, "Forward edge: type=%d, opcode=%d, latency=%d\n",
+                                fwdEdge->edgetype, fwdEdge->opcode, fwdEdge->latency);
+                        fprintf(stderr, "Backward edge: type=%d, opcode=%d, latency=%d\n",
+                                bwdEdge->edgetype, bwdEdge->opcode, bwdEdge->latency);
+                        return 0;
+                    }
+                    found = 1;
+                    break;
+                }
+                bwdEdge = bwdEdge->next;
+            }
+
+            if (!found)
+            {
+                fprintf(stderr, "Error: No corresponding backward edge for forward edge (%d,%d)\n",
+                        i, dest);
+                return 0;
+            }
+
+            fwdEdge = fwdEdge->next;
+        }
+    }
+
+    return 1;
+}
+
+/*
+ * Effects: sets MAX_VERTICES to int n. That's all.
+ */
 void set_mv(int n)
 {
     MAX_VERTICES = n;
 }
 
-// Prints a graph to a dot file. For visualization purposes.
-/* Draft one this sucks
-void printGraph(Graph *g)
-{
-    FILE *dotfile;
-
-    dotfile = fopen("dpgraph.dot", "w"); // Open for writing
-
-    if (dotfile == NULL)
-    {
-        printf("Error opening file!\n");
-        return 1; // Indicate an error
-    }
-
-    fprintf(dotfile, "digraph DG {\n");
-    Node *currNode = g->forwardgraph[0];
-    for (int i = 0; i < MAX_VERTICES; i++)
-    {
-        if (g->forwardgraph[i]->vertex == -2)
-        {
-            fprintf(dotfile, " %d [label=\"%d: ]");
-        }
-    }
-
-    fprintf(dotfile, "}");
-    fclose(dotfile);
-}
-*/
-
+/*
+ * Requires:
+ *  - Graph *g: the Graph to print.
+ *  - Instruction *ir: the IR of the ILOC input g is based on.
+ *  - FILE *dotfile: What we're printing to.
+ * 
+ * Effects:
+ *  - Exports the graph to a dot file to make my life easier.
+ */
 void printGraph(Graph *g, struct Instruction *ir, FILE *dotfile)
 {
     if (dotfile == NULL)
@@ -540,7 +669,7 @@ void printGraph(Graph *g, struct Instruction *ir, FILE *dotfile)
     // Start the digraph
     fprintf(dotfile, "digraph DG {\n");
 
-    // First pass: Print all nodes with their ILOC instructions
+    // Print all nodes with their ILOC instructions
     struct Instruction *curr = ir->next;
     while (curr->line != -1)
     {
@@ -548,7 +677,7 @@ void printGraph(Graph *g, struct Instruction *ir, FILE *dotfile)
         { // Node exists in graph
             fprintf(dotfile, "    %d [label=\"%d: ", curr->line, curr->line);
 
-            // Format the ILOC instruction based on opcode
+            // Format ILOC instruction by opcode
             switch (curr->opcode)
             {
             case LOADIL:
@@ -587,8 +716,8 @@ void printGraph(Graph *g, struct Instruction *ir, FILE *dotfile)
         curr = curr->next;
     }
 
-    // Second pass: Print all edges with dependency information
-    // Data dependencies are typically from use to definition
+    // Print edges with dependency info
+    // the vr stuff is wrong. I'll get it later. Maybe.
     for (int i = 1; i < g->nodeCount; i++)
     {
         if (g->forwardgraph[i]->vertex == -2)
@@ -611,7 +740,6 @@ void printGraph(Graph *g, struct Instruction *ir, FILE *dotfile)
                 }
                 else
                 {
-                    // For data dependencies, show the register that creates the dependency
                     struct Instruction *srcInst = ir;
                     while (srcInst != NULL && srcInst->line != src)
                     {
@@ -628,34 +756,13 @@ void printGraph(Graph *g, struct Instruction *ir, FILE *dotfile)
         }
     }
 
-    // Third pass: Add any special edges (like Conflict edges for memory operations)
-    /*
-    curr = ir->next;
-    while (curr->line != 0)
-    {
-        if (curr->opcode == OUTPUT)
-        {
-            // Add conflict edges from output to any previous stores
-            struct Instruction *prev = ir->next;
-            while (prev->line != curr->line)
-            {
-                if (prev->opcode == STORE)
-                {
-                    fprintf(dotfile, "    %d -> %d [label=\" Conflict\"];\n",
-                            curr->line, prev->line);
-                }
-                prev = prev->next;
-            }
-        }
-        curr = curr->next;
-    }
-    */
-
     fprintf(dotfile, "}\n");
     fflush(dotfile);
 }
 
-// Helper function to write graph to a DOT file
+/*
+ * Helper function to write graph to a DOT file
+ */
 void writeToDotFile(Graph *g, struct Instruction *ir)
 {
     FILE *dotfile = fopen("dgraph.dot", "w");
