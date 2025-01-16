@@ -4,8 +4,9 @@
 #include "ir.h"
 
 // Type definitions
-typedef struct Graph Graph; // defines the dependence graph
-typedef struct Node Node;   // defines a node in the dg
+typedef struct Graph Graph;       // defines the dependence graph
+typedef struct Node Node;         // defines a node in the dg (but really it's easier to think of as an edge, tbh).
+typedef struct ListHead ListHead; // defines a list head in the adjacency list (think of this as the node)
 
 // Renaming functions
 void rename_registers(struct Instruction *ir);
@@ -24,7 +25,8 @@ int addNode(Graph *graph, int node, int opcode);
 void writeToDotFile(Graph *g, struct Instruction *ir);
 void printNodes(Graph *g);
 void printEdges(Graph *g);
-void setnodeOC(Node *n, int ocode);
+void setListHeadOC(ListHead *n, int ocode);
+void setNodeOC(Node *n, int ocode);
 int getLatency(int ocode);
 int checkGraphConsistency(Graph *graph);
 struct Graph *createGraph(int vertices);
@@ -32,6 +34,13 @@ int addEdge(Graph *graph, int src, int dest, int etype, int ocode);
 void getSuccessors(Graph *graph, int vertex);
 void getPredecessors(Graph *graph, int vertex);
 void freeGraph(Graph *graph);
+void printLatencies(Graph *g);
+
+// Priority functions
+int setMaxLatency(Graph *g, int vertex);
+int setDescendants(Graph *g, int vertex);
+int calculatePriority(int alpha, int beta);
+int addPriorities(Graph *dp);
 
 // Debugging functions (Lab 2)
 void print_renamed_code_vr(struct Instruction *ir);
@@ -56,11 +65,37 @@ static int MAX_VERTICES = 0; // max vertices in dependence graph
 // A node in the adjacency list.
 struct Node
 {
-    int vertex;
-    int opcode;
+    int vertex; // the node label
+    // int opcode; // the opcode associated with the node
     int edgetype; // 0 (Data), 1 (Serialization), 2 (Conflict), -1 (unassigned)
-    int latency;
+    int latency;  // the latency associated with the edge the node is part of
+    // int latency_sum;// the latency sum associated with the node
+    // int descendants;// the number of descendants of the node
+    struct Node *next; // the proceeding node in the adjacency list.
+};
+
+/*
+ * Graph structure, based on an adjacency list. Both forwards and backwards
+ * graphs for predecessors and successors.
+ */
+struct Graph
+{
+    int nodeCount;
+
+    ListHead **forwardgraph;
+    ListHead **backwardgraph;
+};
+
+struct ListHead
+{
+    int opcode;
+    bool ingraph;
+    int op_latency;
+    int latency_sum;
+    int descendants;
+    int priority;
     struct Node *next;
+    struct Instruction *instruction;
 };
 
 // This runs the program. Duh.
@@ -114,6 +149,11 @@ int main(int argc, char **argv)
     Graph *dp = build_dp(ir);
     // Make sure that the graph you built is decent.
     checkGraphConsistency(dp);
+    // For testing
+    printLatencies(dp);
+    // Now let's chuck in some priorities:
+    addPriorities(dp);
+
     // Use graphviz, for the sake of my sanity.
     writeToDotFile(dp, ir);
     return 0;
@@ -148,6 +188,13 @@ Graph *build_dp(struct Instruction *ir)
     struct Instruction *currOp = ir->next;
     while (currOp->line != -1)
     {
+        // I've decided I don't want to deal with nops, and don't want to edit my parser.
+        if (currOp->opcode == NOPL)
+        {
+            currOp = currOp->next;
+            continue;
+        }
+
         int op = currOp->line;
         printf("op: %d, opcode: %d\n", op, currOp->opcode);
         printNodes(dgraph);
@@ -257,19 +304,117 @@ Graph *build_dp(struct Instruction *ir)
     return (dgraph);
 }
 
-/* Graph Management Functions and Definitions */
-
-/*
- * Graph structure, based on an adjacency list. Both forwards and backwards
- * graphs for predecessors and successors.
- */
-struct Graph
+int addPriorities(Graph *dp)
 {
-    int nodeCount;
+    int delta = 2;
+    // Fixed point: iterate until changes are minimal.
+    while (delta > 1)
+    {
+        delta = 0;
+        // Iterate over each of the nodes.
+        for (int i = 0; i < dp->nodeCount; i++)
+        {
+            if (dp->forwardgraph[i]->ingraph)
+            { // If the node is in the graph
+                int old_l_sum = dp->forwardgraph[i]->latency_sum;
+                int old_d_sum = dp->forwardgraph[i]->descendants;
+                int l_sum = setMaxLatency(dp, i);  // get the maximum latency of predecessors
+                int d_sum = setDescendants(dp, i); // get the descendants sums
 
-    Node **forwardgraph;
-    Node **backwardgraph;
-};
+                int old_priority = calculatePriority(old_l_sum, old_d_sum);
+                int new_priority = calculatePriority(l_sum, d_sum);
+                dp->forwardgraph[i]->priority = new_priority;
+                delta += (new_priority - old_priority);
+            }
+        }
+    }
+    return (0);
+}
+
+// Update both please silly goose!!
+int setMaxLatency(Graph *g, int vertex)
+{
+    // What does this need to do, Cyrus?
+
+    // if you're a root, I can just make your latency sum your op_latency. Done.
+    // Otherwise, for each node, your latency (alpha) will be:
+    // - your op_latency +
+    // - of your predecessors, the one whose latency_sum + edge_latency is highest.
+
+    // This code is total bunk
+    Node *pred = g->backwardgraph[vertex]->next;
+    // Start with own latency
+
+    // If no predecessors, just make your latency sum your op_latency
+    if (pred == NULL) {
+        g->forwardgraph[vertex]->latency_sum = g->forwardgraph[vertex]->op_latency;
+        g->backwardgraph[vertex]->latency_sum = g->forwardgraph[vertex]->op_latency;
+        return (g->forwardgraph[vertex]->op_latency);
+    }
+
+    // Otherwise, for each node, your latency (alpha) will be:
+    // - your op_latency +
+    // - of your predecessors, the one whose latency_sum + edge_latency is highest.
+    int maxPredPathSum = 0;
+    while (pred != NULL) {
+        // Just use predecessor's latency_sum since it already includes their latency
+        int potentialSum = (pred->latency + g->forwardgraph[pred->vertex]->latency_sum);
+        if (potentialSum > maxPredPathSum) {
+            maxPredPathSum = potentialSum;
+        }
+        pred = pred->next;
+    }
+
+    // Update both graphs with total (our latency + max pred path)
+    g->forwardgraph[vertex]->latency_sum = maxPredPathSum;
+    g->backwardgraph[vertex]->latency_sum = maxPredPathSum;
+    return maxPredPathSum;
+}
+
+void printLatencies(Graph *g)
+{
+    printf("printLatencies:\n");
+    for (int i = 0; i < g->nodeCount; i++)
+    {
+        if (g->forwardgraph[i]->ingraph)
+        {
+            printf("    %d has op latency %d\n", i, g->forwardgraph[i]->op_latency);
+            if (g->forwardgraph[i]->op_latency != g->backwardgraph[i]->op_latency)
+            {
+                fprintf(stderr, "   printLatency warning: forward and backward don't match for node %d\n", i);
+            }
+        }
+    }
+}
+
+// Update both please silly goose!!
+int setDescendants(Graph *g, int vertex)
+{
+    // TODO: make this work lol
+    Node *child = g->forwardgraph[vertex]->next;
+    // Just count immediate children
+    // int directChildren = 0;
+    int childCount = 0;
+
+    while (child != NULL)
+    {
+        childCount += (1 + g->forwardgraph[child->vertex]->descendants);
+        child = child->next;
+    }
+
+    // g->forwardgraph[vertex]->descendants = directChildren;
+    // return directChildren;
+    g->forwardgraph[vertex]->descendants = childCount;
+    g->backwardgraph[vertex]->descendants = childCount;
+    return childCount;
+}
+
+int calculatePriority(int alpha, int beta)
+{
+    return ((1 * alpha) + (0 * beta));
+}
+
+/* Graph Management Functions and Definitions */
 
 /*
  * Requires:
@@ -279,7 +424,7 @@ struct Graph
  *  - ocode: an int representing the opcode of the node. Pass -1 if unassigned.
  *
  * Effects:
- *  - Returns a node with a vertex of v value with no successor.
+ *  - Returns a node with a vertex of v value with no successor and priority 0.
  */
 Node *createNode(int v, int etype, int ocode)
 {
@@ -290,16 +435,14 @@ Node *createNode(int v, int etype, int ocode)
         (Not serialization or conflict, or we'll get the wrong latencies.) */
     if (etype == 0)
     {
-        setnodeOC(newNode, ocode);
+        setNodeOC(newNode, ocode);
     }
     else if (etype == 1)
     {
-        newNode->opcode = ocode;
         newNode->latency = 1;
     }
     else if (etype == 2)
     {
-        newNode->opcode = ocode;
         newNode->latency = 3;
     }
     newNode->edgetype = etype;
@@ -307,17 +450,62 @@ Node *createNode(int v, int etype, int ocode)
 }
 
 /*
+ * Makes the list head. Gulp.
+ */
+ListHead *createListHead(int v, int ocode)
+{
+    ListHead *newListHead = (ListHead *)malloc(sizeof(ListHead));
+    newListHead->next = NULL;
+    /* We only want to use setListHeadOC on data edges.
+        (Not serialization or conflict, or we'll get the wrong latencies.) */
+    setListHeadOC(newListHead, ocode);
+
+    newListHead->descendants = 0;
+    newListHead->ingraph = false;
+    return newListHead;
+}
+
+/*
  *  Requires:
- *      - n: a node whose opcode and latency will be updated.
+ *      - n: a node whose opcode, latency, and latency sum will be updated.
  *      - ocode: the opcode to be given to the node
  *
  *  Effects:
- *      - Updates opcode and latency. This function exists so I never forget to do both. *
+ *      - Updates opcode, latency, and latency sum. This function exists so I never forget to do them all.
  */
-void setnodeOC(Node *n, int ocode)
+void setListHeadOC(ListHead *n, int ocode)
 {
     n->opcode = ocode;
 
+    switch (ocode)
+    {
+    case LOAD:
+        n->op_latency = 6;
+        break;
+    case STORE:
+        n->op_latency = 6;
+        break;
+    case MULT:
+        n->op_latency = 3;
+        break;
+    default:
+        n->op_latency = 1;
+        break;
+    }
+
+    n->latency_sum = n->op_latency;
+}
+
+/*
+ *  Requires:
+ *      - n: a node whose opcode, latency, and latency sum will be updated.
+ *      - ocode: the opcode to be given to the node
+ *
+ *  Effects:
+ *      - Updates opcode, latency, and latency sum. This function exists so I never forget to do them all.
+ */
+void setNodeOC(Node *n, int ocode)
+{
     switch (ocode)
     {
     case LOAD:
@@ -386,14 +574,14 @@ Graph *createGraph(int ncount)
     printf("Graph nodeCount: %d\n", ncount);
 
     // Allocate arrays
-    dgraph->forwardgraph = (Node **)malloc(ncount * sizeof(Node *));
-    dgraph->backwardgraph = (Node **)malloc(ncount * sizeof(Node *));
+    dgraph->forwardgraph = (ListHead **)malloc(ncount * sizeof(ListHead *));
+    dgraph->backwardgraph = (ListHead **)malloc(ncount * sizeof(ListHead *));
 
     // Initialize with dummy heads
     for (int i = 0; i < ncount; i++)
     {
-        dgraph->forwardgraph[i] = createNode(-1, -1, -1);  // -1 indicates dummy head that is NOT IN GRAPH
-        dgraph->backwardgraph[i] = createNode(-1, -1, -1); // -1 indicates dummy head that is NOT IN GRAPH
+        dgraph->forwardgraph[i] = createListHead(-1, -1);  // -1 indicates dummy head that is NOT IN GRAPH
+        dgraph->backwardgraph[i] = createListHead(-1, -1); // -1 indicates dummy head that is NOT IN GRAPH
     }
 
     return (dgraph);
@@ -406,7 +594,7 @@ Graph *createGraph(int ncount)
  *
  *  Effects:
  *      - Updates the dummy head at index node of the forwards and backwards
- *          graphs to have value -2, which indicates that the node is present
+ *          graphs to have vertex value -2, which indicates that the node is present
  *          in the graph.
  */
 int addNode(Graph *graph, int node, int opcode)
@@ -419,13 +607,13 @@ int addNode(Graph *graph, int node, int opcode)
         return (1);
     }
 
-    graph->forwardgraph[node]->vertex = -2;
+    graph->forwardgraph[node]->ingraph = true;
     // graph->forwardgraph[node]->opcode = opcode;
-    setnodeOC(graph->forwardgraph[node], opcode);
+    setListHeadOC(graph->forwardgraph[node], opcode);
 
-    graph->backwardgraph[node]->vertex = -2;
+    graph->backwardgraph[node]->ingraph = true;
     // graph->backwardgraph[node]->opcode = opcode;
-    setnodeOC(graph->backwardgraph[node], opcode);
+    setListHeadOC(graph->backwardgraph[node], opcode);
 
     return (0);
 }
@@ -438,7 +626,7 @@ void printNodes(Graph *g)
     printf("PRINTNODES CHECK:\n");
     for (int i = 0; i < g->nodeCount; i++)
     {
-        if (g->forwardgraph[i]->vertex == -2)
+        if (g->forwardgraph[i]->ingraph)
         {
             printf("    Node present: %d\n", i);
         }
@@ -460,7 +648,7 @@ int addEdge(Graph *graph, int src, int dest, int etype, int ocode)
 {
 
     // Ensure that the nodes exists.
-    if (graph->forwardgraph[src]->vertex == -1 || graph->backwardgraph[dest]->vertex == -1)
+    if (!graph->forwardgraph[src]->ingraph || !graph->backwardgraph[dest]->ingraph)
     {
         printf("addEdge: Trying to add an edge with nodes that don't exist (%d, %d).\n", src, dest);
         return (1);
@@ -473,7 +661,7 @@ int addEdge(Graph *graph, int src, int dest, int etype, int ocode)
     }
 
     // Check if the edge already exists
-    Node *predEdge = graph->forwardgraph[src];
+    Node *predEdge = NULL;
     Node *oldEdge = graph->forwardgraph[src]->next;
     while (oldEdge != NULL)
     {
@@ -481,8 +669,17 @@ int addEdge(Graph *graph, int src, int dest, int etype, int ocode)
         {
             if (oldEdge->latency < getLatency(ocode))
             { // if it does and is smaller, delete the old edge and continue
-                predEdge->next = oldEdge->next;
-                free(oldEdge);
+                // Special case: this occurs in the first node after the head
+                if (predEdge == NULL)
+                {
+                    predEdge = oldEdge->next;
+                    free(oldEdge);
+                }
+                else
+                {
+                    predEdge->next = oldEdge->next;
+                    free(oldEdge);
+                }
             }
             else
             { // If it's bigger, we don't need to add this current edge.
@@ -490,8 +687,8 @@ int addEdge(Graph *graph, int src, int dest, int etype, int ocode)
             }
         }
 
+        predEdge = oldEdge;
         oldEdge = oldEdge->next;
-        predEdge = predEdge->next;
     }
 
     // Create the new nodes
@@ -517,7 +714,7 @@ void printEdges(Graph *g)
     printf("EDGE CHECK (src, dest)\n");
     for (int i = 0; i < g->nodeCount; i++)
     {
-        if (g->forwardgraph[i]->vertex == -2)
+        if (g->forwardgraph[i]->ingraph)
         {
             Node *edge = g->forwardgraph[i]->next;
             while (edge != NULL)
@@ -550,11 +747,11 @@ int checkGraphConsistency(Graph *graph)
     // Get raw edge count in both graphs
     for (int i = 0; i < graph->nodeCount; i++)
     {
-        Node *fwdNode = graph->forwardgraph[i];
-        Node *bwdNode = graph->backwardgraph[i];
+        ListHead *fwdNode = graph->forwardgraph[i];
+        ListHead *bwdNode = graph->backwardgraph[i];
 
         // Skip if node doesn't exist in graph (vertex == -1)
-        if (fwdNode->vertex == -1 || bwdNode->vertex == -1)
+        if (!fwdNode->ingraph || !bwdNode->ingraph)
         {
             continue;
         }
@@ -587,10 +784,10 @@ int checkGraphConsistency(Graph *graph)
     // Second pass: verify edge correspondence
     for (int i = 0; i < graph->nodeCount; i++)
     {
-        Node *fwdNode = graph->forwardgraph[i];
+        ListHead *fwdNode = graph->forwardgraph[i];
 
         // Skip if node doesn't exist
-        if (fwdNode->vertex == -1)
+        if (!fwdNode->ingraph)
         {
             continue;
         }
@@ -609,16 +806,14 @@ int checkGraphConsistency(Graph *graph)
                 if (bwdEdge->vertex == i)
                 {
                     // Found corresponding edge, verify that the properties match, too
-                    if (bwdEdge->edgetype != fwdEdge->edgetype ||
-                        bwdEdge->opcode != fwdEdge->opcode ||
-                        bwdEdge->latency != fwdEdge->latency)
+                    if (bwdEdge->edgetype != fwdEdge->edgetype)
                     {
                         fprintf(stderr, "Error: Edge property mismatch for edge (%d,%d)\n",
                                 i, dest);
-                        fprintf(stderr, "Forward edge: type=%d, opcode=%d, latency=%d\n",
-                                fwdEdge->edgetype, fwdEdge->opcode, fwdEdge->latency);
-                        fprintf(stderr, "Backward edge: type=%d, opcode=%d, latency=%d\n",
-                                bwdEdge->edgetype, bwdEdge->opcode, bwdEdge->latency);
+                        fprintf(stderr, "Forward edge: type=%d\n",
+                                fwdEdge->edgetype);
+                        fprintf(stderr, "Backward edge: type=%d\n",
+                                bwdEdge->edgetype);
                         return 0;
                     }
                     found = 1;
@@ -654,7 +849,7 @@ void set_mv(int n)
  *  - Graph *g: the Graph to print.
  *  - Instruction *ir: the IR of the ILOC input g is based on.
  *  - FILE *dotfile: What we're printing to.
- * 
+ *
  * Effects:
  *  - Exports the graph to a dot file to make my life easier.
  */
@@ -673,7 +868,7 @@ void printGraph(Graph *g, struct Instruction *ir, FILE *dotfile)
     struct Instruction *curr = ir->next;
     while (curr->line != -1)
     {
-        if (g->forwardgraph[curr->line]->vertex == -2)
+        if (g->forwardgraph[curr->line]->ingraph)
         { // Node exists in graph
             fprintf(dotfile, "    %d [label=\"%d: ", curr->line, curr->line);
 
@@ -711,7 +906,7 @@ void printGraph(Graph *g, struct Instruction *ir, FILE *dotfile)
                 fprintf(dotfile, "nop");
                 break;
             }
-            fprintf(dotfile, "\"];\n");
+            fprintf(dotfile, "\n Priority: %d\"];\n", g->forwardgraph[curr->line]->priority);
         }
         curr = curr->next;
     }
@@ -720,7 +915,8 @@ void printGraph(Graph *g, struct Instruction *ir, FILE *dotfile)
     // the vr stuff is wrong. I'll get it later. Maybe.
     for (int i = 1; i < g->nodeCount; i++)
     {
-        if (g->forwardgraph[i]->vertex == -2)
+        // Iterate over all possible ListHeads (nodes).
+        if (g->forwardgraph[i]->ingraph)
         {
             Node *edge = g->forwardgraph[i]->next;
             while (edge != NULL)
